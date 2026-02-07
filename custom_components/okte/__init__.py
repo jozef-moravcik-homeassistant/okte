@@ -1,711 +1,475 @@
-"""
-OKTE Integration for Home Assistant
-Custom integration for fetching and analyzing electricity prices from OKTE Slovakia
+from __future__ import annotations
+"""The OKTE Integration"""
+"""Author: Jozef Moravcik"""
+"""email: jozef.moravcik@moravcik.eu"""
 
-Author: Jozef Moravcik
-email: jozef.moravcik@moravcik.eu
-"""
+""" __init__.py """
 
-import logging
 import asyncio
-from datetime import datetime, time, timedelta
-
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.const import Platform
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers import entity_registry as er
+import logging
+import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry, Platform
+from homeassistant.core import HomeAssistant, ServiceCall, callback
+import homeassistant.helpers.config_validation as cv
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.template import Template
+from homeassistant.helpers.event import async_call_later, async_track_time_interval, async_track_state_change_event, async_track_time_change
+from homeassistant.helpers.storage import Store
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.entity import DeviceInfo
+from datetime import timedelta, datetime, time as dt_time
 
 from .const import (
     DOMAIN,
-    CONF_MOST_EXPENSIVE_TIME_WINDOW_PERIOD,
-    CONF_CHEAPEST_TIME_WINDOW_PERIOD,
-    CONF_FETCH_TIME,
-    DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD,
-    DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD,
-    DEFAULT_FETCH_DAYS,
-    DEFAULT_FETCH_TIME,
-)
-from .okte import (
-    fetch_okte_data,
-    calculate_price_statistics,
-    find_cheapest_time_window,
-    find_most_expensive_time_window,
-    print_price_statistics,
-    print_cheapest_window,
-    print_most_expensive_window,
-    find_multiple_expensive_windows,
-    find_multiple_cheap_windows,
+    DEVICE_TYPE_MASTER,
+    DEVICE_TYPE_CALCULATOR,
 )
 
-_LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
+# Note: Platform.SELECT is not included but select.py file is kept for future use
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.NUMBER, Platform.SWITCH, Platform.TIME]
 
-# Platforms supported by this integration
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.NUMBER]
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the OKTE component."""
-    _LOGGER.info("Setting up OKTE integration")
-    
-    # Store the configuration
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {}
-    
-    return True
+    """Set up OKTE from configuration.yaml."""
+    if DOMAIN not in config:
+        return True
 
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "import"}, data=config[DOMAIN]
+        )
+    )
+
+    return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OKTE from a config entry."""
-    _LOGGER.info(f"Setting up OKTE config entry: {entry.title}")
     
-    # Initialize data storage
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {}
+    from .const import (
+        CONF_DEVICE_TYPE, CONF_DEVICE_NAME, DEFAULT_DEVICE_NAME,
+        CONF_INCLUDE_DEVICE_NAME_IN_ENTITY, DEFAULT_INCLUDE_DEVICE_NAME_IN_ENTITY,
+        CONF_FETCH_TIME, DEFAULT_FETCH_TIME,
+        CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS,
+        CONF_MASTER_DEVICE, DEFAULT_MASTER_DEVICE,
+        SERVICE_SYSTEM_STARTED, SERVICE_FETCH_DATA,
+        DEBOUNCE_DELAY,
+        DEFAULT_FALLBACK_CHECK_INTERVAL,
+        ENTITY_LOWEST_WINDOW_SIZE, ENTITY_LOWEST_TIME_FROM, ENTITY_LOWEST_TIME_TO,
+        ENTITY_HIGHEST_WINDOW_SIZE, ENTITY_HIGHEST_TIME_FROM, ENTITY_HIGHEST_TIME_TO,
+        ENTITY_LOWEST_AUTO_TIME_FROM, ENTITY_LOWEST_AUTO_TIME_TO,
+        ENTITY_HIGHEST_AUTO_TIME_FROM, ENTITY_HIGHEST_AUTO_TIME_TO,
+    )
+    from .okte import OKTE_Master_Instance, OKTE_Window_Instance
+
+    # Get device type
+    device_type = entry.options.get(
+        CONF_DEVICE_TYPE,
+        entry.data.get(CONF_DEVICE_TYPE, DEVICE_TYPE_MASTER)
+    )
     
-    hass.data[DOMAIN]["config"] = entry.data
-    hass.data[DOMAIN]["options"] = entry.options
-    hass.data[DOMAIN]["connection_status"] = False  # Initial connection status
+    # Load common parameters
+    device_name = entry.options.get(
+        CONF_DEVICE_NAME,
+        entry.data.get(CONF_DEVICE_NAME, DEFAULT_DEVICE_NAME)
+    )
+    include_device_name_in_entity = entry.options.get(
+        CONF_INCLUDE_DEVICE_NAME_IN_ENTITY,
+        entry.data.get(CONF_INCLUDE_DEVICE_NAME_IN_ENTITY, DEFAULT_INCLUDE_DEVICE_NAME_IN_ENTITY)
+    )
+
+    # Initialize instance based on device type
+    if device_type == DEVICE_TYPE_MASTER:
+        instance = OKTE_Master_Instance()
+        
+        # Load master-specific parameters
+        fetch_time = entry.options.get(
+            CONF_FETCH_TIME,
+            entry.data.get(CONF_FETCH_TIME, DEFAULT_FETCH_TIME)
+        )
+        fetch_days = entry.options.get(
+            CONF_FETCH_DAYS,
+            entry.data.get(CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS)
+        )
+        
+        # Set master settings
+        instance.settings.device_name = device_name
+        instance.settings.include_device_name_in_entity = include_device_name_in_entity
+        instance.settings.fetch_time = fetch_time
+        instance.settings.fetch_days = fetch_days
+        
+    else:  # DEVICE_TYPE_CALCULATOR
+        instance = OKTE_Window_Instance()
+        
+        # Load window-specific parameters
+        master_device = entry.options.get(
+            CONF_MASTER_DEVICE,
+            entry.data.get(CONF_MASTER_DEVICE, DEFAULT_MASTER_DEVICE)
+        )
+        
+        # Set window settings
+        instance.settings.device_name = device_name
+        instance.settings.include_device_name_in_entity = include_device_name_in_entity
+        instance.settings.master_device = master_device
+        
+        # Initialize number values for window size (will be set by number entities)
+        instance.number_values = {
+            ENTITY_LOWEST_WINDOW_SIZE: 3,  # Default 3 hours
+            ENTITY_HIGHEST_WINDOW_SIZE: 3,  # Default 3 hours
+        }
+        
+        # Initialize time values (will be set by time entities)
+        instance.time_values = {
+            ENTITY_LOWEST_TIME_FROM: dt_time(0, 0),  # Default 00:00
+            ENTITY_LOWEST_TIME_TO: dt_time(23, 45),  # Default 23:45
+            ENTITY_HIGHEST_TIME_FROM: dt_time(0, 0),  # Default 00:00
+            ENTITY_HIGHEST_TIME_TO: dt_time(23, 45),  # Default 23:45
+        }
+        
+        # Initialize switch values (will be set by switch entities)
+        instance.switch_values = {
+            ENTITY_LOWEST_AUTO_TIME_FROM: False,
+            ENTITY_LOWEST_AUTO_TIME_TO: False,
+            ENTITY_HIGHEST_AUTO_TIME_FROM: False,
+            ENTITY_HIGHEST_AUTO_TIME_TO: False,
+        }
+
+    # Set hass and entry_id
+    instance.hass = hass
+    instance._entry_id = entry.entry_id
     
-    # Setup coordinator for automatic data fetching
-    coordinator = OkteDataCoordinator(hass, entry)
-    hass.data[DOMAIN]["coordinator"] = coordinator
-    
-    # Start the coordinator
-    await coordinator.async_start()
-    
-    # Set up sensor platform
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    
-    # Register services
-    await _async_register_services(hass)
-    
-    # Listen for options updates
-    entry.async_on_unload(entry.add_update_listener(async_update_options))
-    
+    # Setup entity IDs
+    instance.setup_entity_ids()
+
+    try:
+        hass.data.setdefault(DOMAIN, {})
+        
+        if device_type == DEVICE_TYPE_MASTER:
+            hass.data[DOMAIN][entry.entry_id] = {
+                "instance": instance,
+                "device_type": device_type,
+                CONF_DEVICE_NAME: device_name,
+                CONF_INCLUDE_DEVICE_NAME_IN_ENTITY: include_device_name_in_entity,
+                CONF_FETCH_TIME: fetch_time,
+                CONF_FETCH_DAYS: fetch_days,
+            }
+        else:
+            hass.data[DOMAIN][entry.entry_id] = {
+                "instance": instance,
+                "device_type": device_type,
+                CONF_DEVICE_NAME: device_name,
+                CONF_INCLUDE_DEVICE_NAME_IN_ENTITY: include_device_name_in_entity,
+                CONF_MASTER_DEVICE: master_device,
+            }
+
+        LOGGER.info(f"=== SETUP ENTRY === Entry ID: {entry.entry_id}, Device Type: {device_type}, Device Name: {device_name}")
+        LOGGER.info(f"About to setup platforms: {PLATFORMS}")
+        
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+        
+        LOGGER.info(f"Platforms setup completed for {device_name}")
+        
+        
+        # Register services
+        if not hass.services.has_service(DOMAIN, SERVICE_SYSTEM_STARTED):
+            hass.services.async_register(
+                DOMAIN,
+                SERVICE_SYSTEM_STARTED,
+                system_started_service,
+            )
+        
+        if device_type == DEVICE_TYPE_MASTER and not hass.services.has_service(DOMAIN, SERVICE_FETCH_DATA):
+            hass.services.async_register(
+                DOMAIN,
+                SERVICE_FETCH_DATA,
+                fetch_data_service,
+            )
+        
+        # Register update listener for options changes
+        entry.async_on_unload(entry.add_update_listener(update_listener))
+        
+        # Setup controller callbacks
+        async def async_update_settings_sensors(_now=None):
+            """Asynchronous update of settings sensors."""
+            async_dispatcher_send(hass, f"{DOMAIN}_settings_update_{entry.entry_id}")
+        
+        async def async_run_my_controller(_now=None):
+            """Periodic execution of my_controller."""
+            await instance.my_controller()
+
+        # Schedule initial calls
+        async_call_later(hass, 2, async_update_settings_sensors)
+        async_call_later(hass, 3, async_run_my_controller)
+        
+        # For Master device: schedule daily fetch at specified time
+        if device_type == DEVICE_TYPE_MASTER:
+            try:
+                fetch_time_parts = fetch_time.split(':')
+                fetch_hour = int(fetch_time_parts[0])
+                fetch_minute = int(fetch_time_parts[1])
+                
+                entry.async_on_unload(
+                    async_track_time_change(
+                        hass,
+                        async_run_my_controller,
+                        hour=fetch_hour,
+                        minute=fetch_minute,
+                        second=0
+                    )
+                )
+                LOGGER.info(f"Scheduled daily fetch at {fetch_time}")
+            except Exception as e:
+                LOGGER.error(f"Error scheduling daily fetch: {e}")
+        
+        # For Window device: setup state change listener for master device
+        if device_type == DEVICE_TYPE_CALCULATOR and master_device:
+            # Track changes in master device sensors
+            from .const import sanitize_device_name
+            if master_device in hass.data.get(DOMAIN, {}):
+                master_instance = hass.data[DOMAIN][master_device].get("instance")
+                if master_instance:
+                    tracked_entities = [
+                        master_instance.SENSOR_ENTITY_LAST_UPDATE,
+                    ]
+                    
+                    async def async_state_changed(event):
+                        """React to state changes with debounce."""
+                        LOGGER.debug("Master device data updated, recalculating windows")
+                        await instance.my_controller()
+                    
+                    entry.async_on_unload(
+                        async_track_state_change_event(
+                            hass,
+                            tracked_entities,
+                            async_state_changed
+                        )
+                    )
+            
+            # Listen for device name changes and update entity names directly in Entity Registry
+            from homeassistant.helpers import device_registry as dr, entity_registry as er
+            from .sensor import _load_translations
+            
+            @callback
+            def device_registry_updated(event):
+                """Handle device registry update - update entity names when device name changes."""
+                if event.data.get("action") != "update":
+                    return
+                
+                # Check if this is our device
+                device_id = event.data.get("device_id")
+                if not device_id:
+                    return
+                
+                changes = event.data.get("changes", {})
+                if "name_by_user" not in changes:
+                    return
+                    
+                device_registry = dr.async_get(hass)
+                device_entry = device_registry.async_get(device_id)
+                
+                if device_entry and (DOMAIN, entry.entry_id) in device_entry.identifiers:
+                    # Our device was updated
+                    new_device_name = device_entry.name_by_user or device_entry.name
+                    
+                    LOGGER.info(f"Device name changed to '{new_device_name}' for {entry.entry_id}, updating entity names")
+                    
+                    # Get current value of checkbox from hass.data (updated on reload)
+                    current_include_device_name = hass.data[DOMAIN][entry.entry_id].get(CONF_INCLUDE_DEVICE_NAME_IN_ENTITY, DEFAULT_INCLUDE_DEVICE_NAME_IN_ENTITY)
+                    
+                    # Only update if checkbox is enabled
+                    if current_include_device_name:
+                        # Schedule async update
+                        async def update_entity_names():
+                            # Load translations
+                            translations = await _load_translations(hass)
+                            
+                            # Get entity registry
+                            entity_registry = er.async_get(hass)
+                            
+                            # Find all entities for this device
+                            entities = er.async_entries_for_device(entity_registry, device_id)
+                            
+                            # Update each entity name
+                            for entity_entry in entities:
+                                # Get translation_key to lookup translated name
+                                translation_key = entity_entry.translation_key
+                                
+                                if translation_key and translations:
+                                    # Determine if sensor or binary_sensor
+                                    domain = entity_entry.entity_id.split('.')[0]
+                                    
+                                    # Get translated name
+                                    entity_trans = translations.get("entity", {}).get(domain, {}).get(translation_key, {})
+                                    translated_name = entity_trans.get("name", translation_key.replace('_', ' ').title())
+                                    
+                                    # Build new name with updated device label
+                                    new_entity_name = f"OKTE - {new_device_name} - {translated_name}"
+                                    
+                                    # Update entity name in registry
+                                    entity_registry.async_update_entity(
+                                        entity_entry.entity_id,
+                                        name=new_entity_name
+                                    )
+                                    
+                                    LOGGER.debug(f"Updated {entity_entry.entity_id} name to: {new_entity_name}")
+                        
+                        # Run async update
+                        hass.async_create_task(update_entity_names())
+            
+            entry.async_on_unload(
+                hass.bus.async_listen(dr.EVENT_DEVICE_REGISTRY_UPDATED, device_registry_updated)
+            )
+        
+        # Fallback periodic check
+        if hasattr(instance.settings, 'fallback_check_interval'):
+            fallback_interval = instance.settings.fallback_check_interval
+        else:
+            fallback_interval = DEFAULT_FALLBACK_CHECK_INTERVAL
+        
+        if fallback_interval > 0:
+            LOGGER.info(f"Fallback periodic check enabled: every {fallback_interval} seconds")
+            entry.async_on_unload(
+                async_track_time_interval(
+                    hass,
+                    async_run_my_controller,
+                    timedelta(seconds=fallback_interval)
+                )
+            )
+        
+        LOGGER.info(f"OKTE {device_type} device '{device_name}' configured successfully")
+
+    except Exception as ex:
+        LOGGER.error("Error while configuration saving: %s", ex)
+        raise ConfigEntryNotReady from ex
+
     return True
 
 
-async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle options updates."""
-    _LOGGER.info("Updating OKTE options")
-    
-    # Update stored options
-    hass.data[DOMAIN]["options"] = entry.options
-    
-    # Restart coordinator with new settings
-    coordinator = hass.data[DOMAIN]["coordinator"]
-    await coordinator.async_restart()
+async def system_started_service(call: ServiceCall) -> None:
+    """Handle system started service call."""
+    try:
+        if DOMAIN not in call.hass.data or not call.hass.data[DOMAIN]:
+            LOGGER.error("No integrations configured")
+            return
 
+        for entry_id, entry_data in call.hass.data[DOMAIN].items():
+            instance = entry_data.get("instance")
+            if instance:
+                await call.hass.async_add_executor_job(instance.system_started)
+
+    except Exception as ex:
+        LOGGER.error("Error in system_started: %s", ex)
+
+
+async def fetch_data_service(call: ServiceCall) -> None:
+    """Handle fetch data service call."""
+    try:
+        if DOMAIN not in call.hass.data or not call.hass.data[DOMAIN]:
+            LOGGER.error("No integrations configured")
+            return
+
+        # Find all master devices and fetch data
+        for entry_id, entry_data in call.hass.data[DOMAIN].items():
+            if entry_data.get("device_type") == DEVICE_TYPE_MASTER:
+                instance = entry_data.get("instance")
+                if instance:
+                    await instance.fetch_and_process_data()
+                    async_dispatcher_send(call.hass, f"{DOMAIN}_feedback_update_{entry_id}")
+
+    except Exception as ex:
+        LOGGER.error("Error in fetch_data: %s", ex)
+
+
+async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options update."""
+    from .const import (
+        CONF_INCLUDE_DEVICE_NAME_IN_ENTITY, DEFAULT_INCLUDE_DEVICE_NAME_IN_ENTITY,
+        CONF_DEVICE_TYPE, DEVICE_TYPE_MASTER
+    )
+    
+    # Get old and new values of checkbox
+    old_include_device_name = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(CONF_INCLUDE_DEVICE_NAME_IN_ENTITY)
+    new_include_device_name = entry.options.get(
+        CONF_INCLUDE_DEVICE_NAME_IN_ENTITY,
+        entry.data.get(CONF_INCLUDE_DEVICE_NAME_IN_ENTITY, DEFAULT_INCLUDE_DEVICE_NAME_IN_ENTITY)
+    )
+    
+    # Reload entry
+    await hass.config_entries.async_reload(entry.entry_id)
+    
+    # If checkbox changed, update entity names in registry
+    if old_include_device_name is not None and old_include_device_name != new_include_device_name:
+        from homeassistant.helpers import device_registry as dr, entity_registry as er
+        from .sensor import _load_translations
+        
+        LOGGER.info(f"Checkbox changed from {old_include_device_name} to {new_include_device_name}, updating entity names")
+        
+        # Get device registry
+        device_registry = dr.async_get(hass)
+        device_entry = device_registry.async_get_device(identifiers={(DOMAIN, entry.entry_id)})
+        
+        if device_entry:
+            # Get entity registry
+            entity_registry = er.async_get(hass)
+            
+            # Load translations
+            translations = await _load_translations(hass)
+            
+            # Find all entities for this device
+            entities = er.async_entries_for_device(entity_registry, device_entry.id)
+            
+            # Get device label
+            device_label = device_entry.name_by_user or device_entry.name
+            
+            # Update each entity name
+            for entity_entry in entities:
+                # Get translation_key to lookup translated name
+                translation_key = entity_entry.translation_key
+                
+                if translation_key and translations:
+                    # Determine domain (sensor, binary_sensor, switch, etc.)
+                    domain = entity_entry.entity_id.split('.')[0]
+                    
+                    # Get translated name
+                    entity_trans = translations.get("entity", {}).get(domain, {}).get(translation_key, {})
+                    translated_name = entity_trans.get("name", translation_key.replace('_', ' ').title())
+                    
+                    # Build new name based on checkbox setting
+                    if new_include_device_name:
+                        device_type = entry.data.get(CONF_DEVICE_TYPE, DEVICE_TYPE_MASTER)
+                        if device_type == DEVICE_TYPE_MASTER:
+                            new_entity_name = f"OKTE - {translated_name}"
+                        else:
+                            new_entity_name = f"OKTE - {device_label} - {translated_name}"
+                    else:
+                        new_entity_name = translated_name
+                    
+                    # Update entity name in registry
+                    entity_registry.async_update_entity(
+                        entity_entry.entity_id,
+                        name=new_entity_name
+                    )
+                    
+                    LOGGER.debug(f"Updated {entity_entry.entity_id} name to: {new_entity_name}")
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    _LOGGER.info(f"Unloading OKTE config entry: {entry.title}")
-    
-    # Stop coordinator
-    if "coordinator" in hass.data[DOMAIN]:
-        coordinator = hass.data[DOMAIN]["coordinator"]
-        await coordinator.async_stop()
-    
-    # Unload sensor platform
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    
-    # Clean up stored data
-    if unload_ok and DOMAIN in hass.data:
-        hass.data[DOMAIN].clear()
-    
-    return unload_ok
-
-
-class OkteDataCoordinator:
-    """Coordinator for automatic OKTE data fetching."""
-    
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
-        """Initialize the coordinator."""
-        self.hass = hass
-        self._attr_unique_id = "okte_fetch_data"
-        self._attr_name = "Fetch Data"
-        self._attr_icon = "mdi:download"
-        self._attr_has_entity_name = True
-        self._attr_translation_key = "fetch_data"
-        self.entry = entry
-        self._unsub_timer = None
-        self._unsub_retry_timer = None
-        self._last_fetch_date = None
-        
-    async def async_start(self):
-        """Start the automatic fetching."""
-        _LOGGER.info("Starting OKTE data coordinator")
-        await self._schedule_next_fetch()
-        
-        # Also fetch data immediately if we don't have any
-        if DOMAIN not in self.hass.data or "data" not in self.hass.data[DOMAIN]:
-            _LOGGER.info("Fetching initial data")
-            await self._fetch_data()
-    
-    async def async_stop(self):
-        """Stop the automatic fetching."""
-        _LOGGER.info("Stopping OKTE data coordinator")
-        if self._unsub_timer:
-            self._unsub_timer.cancel()
-            self._unsub_timer = None
-        if self._unsub_retry_timer:
-            self._unsub_retry_timer.cancel()
-            self._unsub_retry_timer = None
-    
-    async def async_restart(self):
-        """Restart the coordinator with new settings."""
-        await self.async_stop()
-        await self.async_start()
-    
-    async def _schedule_next_fetch(self):
-        """Schedule the next data fetch."""
-        # Get fetch time from config
-        fetch_time_str = self._get_fetch_time()
-        
-        try:
-            fetch_time = time.fromisoformat(fetch_time_str)
-        except ValueError:
-            _LOGGER.error(f"Invalid fetch time format: {fetch_time_str}, using default")
-            fetch_time = time.fromisoformat(DEFAULT_FETCH_TIME)
-        
-        # Calculate next fetch time
-        now = datetime.now()
-        next_fetch = datetime.combine(now.date(), fetch_time)
-        
-        # If the time has already passed today, schedule for tomorrow
-        if next_fetch <= now:
-            next_fetch += timedelta(days=1)
-        
-        # Calculate delay
-        delay = (next_fetch - now).total_seconds()
-        
-        _LOGGER.info(f"Next OKTE data fetch scheduled for: {next_fetch}")
-        
-        # Schedule the fetch
-        self._unsub_timer = self.hass.loop.call_later(
-            delay, lambda: asyncio.create_task(self._fetch_and_reschedule())
-        )
-    
-    async def _fetch_and_reschedule(self):
-        """Fetch data and schedule next fetch."""
-        await self._fetch_data()
-        await self._schedule_next_fetch()
-    
-    async def _schedule_retry(self):
-        """Schedule retry in 1 minute if fetch failed."""
-        _LOGGER.info("Scheduling retry in 1 minute")
-        self._unsub_retry_timer = self.hass.loop.call_later(
-            60, lambda: asyncio.create_task(self._fetch_data())
-        )
-    
-    async def _fetch_data(self):
-        """Fetch OKTE data."""
-        try:
-            _LOGGER.debug("Fetching OKTE data automatically")
-            
-            # Get configuration
-            max_window_hours = self._get_max_window_hours()
-            min_window_hours = self._get_min_window_hours()
-            fetch_days = DEFAULT_FETCH_DAYS
-            
-            # Fetch data in executor to avoid blocking
-            data = await self.hass.async_add_executor_job(
-                fetch_okte_data, fetch_days, None
-            )
-            
-            if data:
-                # Calculate statistics
-                statistics = await self.hass.async_add_executor_job(
-                    calculate_price_statistics, data
-                )
-                
-                # Find cheapest window
-                cheapest_window = await self.hass.async_add_executor_job(
-                    find_cheapest_time_window, data, min_window_hours
-                )
-                
-                # Find most expensive window
-                most_expensive_window = await self.hass.async_add_executor_job(
-                    find_most_expensive_time_window, data, max_window_hours
-                )
-                
-                # Store data
-                self.hass.data[DOMAIN]["data"] = data
-                self.hass.data[DOMAIN]["statistics"] = statistics
-                self.hass.data[DOMAIN]["cheapest_window"] = cheapest_window
-                self.hass.data[DOMAIN]["most_expensive_window"] = most_expensive_window
-                self.hass.data[DOMAIN]["last_update"] = datetime.now()
-                self.hass.data[DOMAIN]["connection_status"] = True  # Success
-                
-                # Cancel retry timer if it exists
-                if self._unsub_retry_timer:
-                    self._unsub_retry_timer.cancel()
-                    self._unsub_retry_timer = None
-                
-                _LOGGER.info(f"Successfully fetched {len(data)} OKTE records")
-                
-                # Fire event for other components
-                self.hass.bus.async_fire(f"{DOMAIN}_data_updated", {
-                    "records": len(data),
-                    "timestamp": datetime.now().isoformat()
-                })
-                
-                # Update all sensors
-                await self._update_sensors()
-                
-            else:
-                _LOGGER.warning("Failed to fetch OKTE data - scheduling retry")
-                self.hass.data[DOMAIN]["connection_status"] = False  # Failed
-                await self._schedule_retry()
-                
-        except Exception as e:
-            _LOGGER.error(f"Error fetching OKTE data: {e} - scheduling retry")
-            self.hass.data[DOMAIN]["connection_status"] = False  # Failed
-            await self._schedule_retry()
-    
-    async def _update_sensors(self):
-        """Update all OKTE sensors after data fetch."""
-        try:
-            # Simple approach: fire a state change event to trigger sensor updates
-            self.hass.bus.async_fire(f"{DOMAIN}_sensors_update")
-            _LOGGER.debug("Triggered sensor updates after data fetch")
-            
-        except Exception as e:
-            _LOGGER.warning(f"Error updating sensors: {e}")
-    
-    def _get_fetch_time(self) -> str:
-        """Get fetch time from configuration."""
-        options = self.hass.data[DOMAIN].get("options", {})
-        config = self.hass.data[DOMAIN].get("config", {})
-        return options.get(CONF_FETCH_TIME) or config.get(CONF_FETCH_TIME, DEFAULT_FETCH_TIME)
-    
-    def _get_max_window_hours(self) -> int:
-        """Get max window hours from configuration."""
-        options = self.hass.data[DOMAIN].get("options", {})
-        config = self.hass.data[DOMAIN].get("config", {})
-        return options.get(CONF_MOST_EXPENSIVE_TIME_WINDOW_PERIOD) or config.get(CONF_MOST_EXPENSIVE_TIME_WINDOW_PERIOD, DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD)
-    
-    def _get_min_window_hours(self) -> int:
-        """Get min window hours from configuration."""
-        options = self.hass.data[DOMAIN].get("options", {})
-        config = self.hass.data[DOMAIN].get("config", {})
-        return options.get(CONF_CHEAPEST_TIME_WINDOW_PERIOD) or config.get(CONF_CHEAPEST_TIME_WINDOW_PERIOD, DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD)
-
-
-async def _recalculate_time_windows(hass: HomeAssistant):
-    """Recalculate time windows and update sensors."""
     try:
-        # Get current data
-        data = hass.data[DOMAIN].get("data", [])
-        if not data:
-            _LOGGER.warning("No OKTE data available for time window recalculation")
-            return False
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         
-        # Get current window hours from config
-        coordinator = hass.data[DOMAIN]["coordinator"]
-        max_window_hours = coordinator._get_max_window_hours()
-        min_window_hours = coordinator._get_min_window_hours()
-        
-        # Recalculate windows
-        cheapest_window = await hass.async_add_executor_job(
-            find_cheapest_time_window, data, min_window_hours
-        )
-        
-        most_expensive_window = await hass.async_add_executor_job(
-            find_most_expensive_time_window, data, max_window_hours
-        )
-        
-        # Update stored windows
-        hass.data[DOMAIN]["cheapest_window"] = cheapest_window
-        hass.data[DOMAIN]["most_expensive_window"] = most_expensive_window
-        
-        # Fire event for sensor updates
-        hass.bus.async_fire(f"{DOMAIN}_data_updated", {
-            "timestamp": datetime.now().isoformat(),
-            "recalculated": True
-        })
-        
-        # Force immediate update of all sensors and detectors
-        await _force_update_all_entities(hass)
-        
-        # Force immediate update of detectors specifically
-        await _update_detectors_immediately(hass)
-        
-        _LOGGER.info(f"Recalculated time windows: cheapest={min_window_hours}h, most_expensive={max_window_hours}h")
-        return True
-        
-    except Exception as e:
-        _LOGGER.error(f"Error recalculating time windows: {e}")
+        if unload_ok:
+            hass.data[DOMAIN].pop(entry.entry_id, None)
+
+        return unload_ok
+
+    except Exception as ex:
+        LOGGER.error("Error unloading entry: %s", ex)
+        if DOMAIN in hass.data and entry.entry_id in hass.data.get(DOMAIN, {}):
+            hass.data[DOMAIN].pop(entry.entry_id, None)
         return False
 
 
-async def _force_update_all_entities(hass: HomeAssistant):
-    """Force immediate update of all OKTE entities."""
-    try:
-        # Get entity registry using the new method
-        entity_registry = er.async_get(hass)
-        okte_entities = []
-        
-        # Find all OKTE entities
-        for entity_id, entity_entry in entity_registry.entities.items():
-            if entity_entry.platform == DOMAIN:
-                okte_entities.append(entity_id)
-        
-        # Force update each entity
-        for entity_id in okte_entities:
-            entity = hass.states.get(entity_id)
-            if entity:
-                # Get the entity object and force update
-                entity_obj = None
-                
-                # Try to get entity from different domains
-                for domain in ['sensor', 'button']:
-                    domain_entities = getattr(hass.data.get(domain, {}), 'entities', {})
-                    if entity_id in domain_entities:
-                        entity_obj = domain_entities[entity_id]
-                        break
-                
-                if entity_obj and hasattr(entity_obj, 'async_write_ha_state'):
-                    # Force state update for the entity
-                    try:
-                        await entity_obj.async_write_ha_state()
-                        _LOGGER.debug(f"Force updated entity: {entity_id}")
-                    except Exception as e:
-                        _LOGGER.debug(f"Could not force update {entity_id}: {e}")
-        
-        # Alternative method: Fire a specific update event
-        hass.bus.async_fire(f"{DOMAIN}_force_update", {
-            "timestamp": datetime.now().isoformat(),
-            "entities_count": len(okte_entities)
-        })
-        
-        _LOGGER.debug(f"Forced update of {len(okte_entities)} OKTE entities")
-        
-    except Exception as e:
-        _LOGGER.warning(f"Error in force update of entities: {e}")
-
-
-async def _update_detectors_immediately(hass: HomeAssistant):
-    """Force immediate update of all detector sensors."""
-    try:
-        # Fire specific detector update event
-        hass.bus.async_fire(f"{DOMAIN}_detectors_update", {
-            "timestamp": datetime.now().isoformat(),
-            "force_update": True
-        })
-        
-        # Also try to directly update detector states if possible
-        entity_registry = er.async_get(hass)
-        detector_entities = []
-        
-        # Find detector entities
-        for entity_id, entity_entry in entity_registry.entities.items():
-            if (entity_entry.platform == DOMAIN and 
-                'detector' in entity_id.lower()):
-                detector_entities.append(entity_id)
-        
-        _LOGGER.debug(f"Found {len(detector_entities)} detector entities for immediate update")
-        
-        # Schedule immediate detector state updates
-        for entity_id in detector_entities:
-            # Try to trigger entity update via service call
-            try:
-                await hass.services.async_call(
-                    'homeassistant', 
-                    'update_entity', 
-                    {'entity_id': entity_id},
-                    blocking=False
-                )
-            except Exception as e:
-                _LOGGER.debug(f"Could not update detector {entity_id}: {e}")
-        
-    except Exception as e:
-        _LOGGER.warning(f"Error updating detectors immediately: {e}")
-
-
-async def _async_register_services(hass: HomeAssistant):
-    """Register OKTE services."""
-    
-    async def fetch_data_service(call: ServiceCall):
-        """Handle fetch data service call."""
-        fetch_days = DEFAULT_FETCH_DAYS
-        fetch_start_day = call.data.get("fetch_start_day")
-        
-        _LOGGER.info(f"Manual OKTE data fetch requested for {fetch_days} days")
-        
-        try:
-            # Fetch data
-            data = await hass.async_add_executor_job(
-                fetch_okte_data, fetch_days, fetch_start_day
-            )
-            
-            if data:
-                # Get window hours for analysis
-                coordinator = hass.data[DOMAIN]["coordinator"]
-                max_window_hours = coordinator._get_max_window_hours()
-                min_window_hours = coordinator._get_min_window_hours()
-                
-                # Calculate statistics
-                statistics = await hass.async_add_executor_job(
-                    calculate_price_statistics, data
-                )
-                
-                # Find windows
-                cheapest_window = await hass.async_add_executor_job(
-                    find_cheapest_time_window, data, min_window_hours
-                )
-                
-                most_expensive_window = await hass.async_add_executor_job(
-                    find_most_expensive_time_window, data, max_window_hours
-                )
-                
-                # Store data
-                hass.data[DOMAIN]["data"] = data
-                hass.data[DOMAIN]["statistics"] = statistics
-                hass.data[DOMAIN]["cheapest_window"] = cheapest_window
-                hass.data[DOMAIN]["most_expensive_window"] = most_expensive_window
-                hass.data[DOMAIN]["last_update"] = datetime.now()
-                hass.data[DOMAIN]["connection_status"] = True  # Success
-                
-                _LOGGER.info(f"Manual fetch completed: {len(data)} records")
-                
-                # Fire event
-                hass.bus.async_fire(f"{DOMAIN}_data_updated", {
-                    "records": len(data),
-                    "timestamp": datetime.now().isoformat(),
-                    "manual": True
-                })
-                
-                # Update all sensors after manual fetch
-                coordinator = hass.data[DOMAIN]["coordinator"]
-                await coordinator._update_sensors()
-            else:
-                _LOGGER.warning("Manual fetch failed")
-                hass.data[DOMAIN]["connection_status"] = False  # Failed
-                
-        except Exception as e:
-            _LOGGER.error(f"Error in manual data fetch: {e}")
-            hass.data[DOMAIN]["connection_status"] = False  # Failed
-    
-    async def calculate_price_statistics_service(call: ServiceCall):
-        """Handle calculate price statistics service call."""
-        try:
-            data = hass.data[DOMAIN].get("data", [])
-            if not data:
-                _LOGGER.warning("No OKTE data available for statistics calculation")
-                return
-            
-            # Calculate statistics
-            statistics = await hass.async_add_executor_job(
-                calculate_price_statistics, data
-            )
-            
-            # Update stored statistics
-            hass.data[DOMAIN]["statistics"] = statistics
-            
-            # Fire event for sensor updates
-            hass.bus.async_fire(f"{DOMAIN}_data_updated", {
-                "timestamp": datetime.now().isoformat(),
-                "statistics_updated": True
-            })
-            
-            _LOGGER.info("Price statistics recalculated")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error calculating price statistics: {e}")
-    
-
-    
-    async def find_multiple_expensive_windows_service(call: ServiceCall):
-        """Handle find multiple expensive windows service call."""
-        try:
-            data = hass.data[DOMAIN].get("data", [])
-            if not data:
-                _LOGGER.warning("No OKTE data available for multiple expensive windows calculation")
-                return
-            
-            window_hours = call.data.get("window_hours", DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD)
-            count = call.data.get("count", 1)
-            
-            # Calculate multiple expensive windows
-            expensive_windows = await hass.async_add_executor_job(
-                find_multiple_expensive_windows, data, window_hours, count
-            )
-            
-            # Store in temporary data (for debugging/logging)
-            hass.data[DOMAIN]["multiple_expensive_windows"] = expensive_windows
-            
-            _LOGGER.info(f"Found {len(expensive_windows)} most expensive {window_hours}-hour windows")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error finding multiple expensive windows: {e}")
-    
-    async def find_multiple_cheap_windows_service(call: ServiceCall):
-        """Handle find multiple cheap windows service call."""
-        try:
-            data = hass.data[DOMAIN].get("data", [])
-            if not data:
-                _LOGGER.warning("No OKTE data available for multiple cheap windows calculation")
-                return
-            
-            window_hours = call.data.get("window_hours", DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD)
-            count = call.data.get("count", 1)
-            
-            # Calculate multiple cheap windows
-            cheap_windows = await hass.async_add_executor_job(
-                find_multiple_cheap_windows, data, window_hours, count
-            )
-            
-            # Store in temporary data (for debugging/logging)
-            hass.data[DOMAIN]["multiple_cheap_windows"] = cheap_windows
-            
-            _LOGGER.info(f"Found {len(cheap_windows)} cheapest {window_hours}-hour windows")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error finding multiple cheap windows: {e}")
-    
-    async def set_cheapest_window_hours_service(call: ServiceCall):
-        """Handle set cheapest window hours service call."""
-        try:
-            # Get current value from configuration as default
-            coordinator = hass.data[DOMAIN]["coordinator"]
-            current_value = coordinator._get_min_window_hours()
-            
-            window_hours = call.data.get("window_hours", current_value)
-            
-            # Validate input
-            if not isinstance(window_hours, int) or window_hours < 1 or window_hours > 24:
-                _LOGGER.error(f"Invalid window_hours value: {window_hours}. Must be between 1 and 24.")
-                return
-            
-            # Update configuration
-            entry = coordinator.entry
-            
-            # Update options
-            new_options = dict(entry.options)
-            new_options[CONF_CHEAPEST_TIME_WINDOW_PERIOD] = window_hours
-            
-            # Save to config entry
-            hass.config_entries.async_update_entry(entry, options=new_options)
-            
-            # Update runtime data
-            hass.data[DOMAIN]["options"] = new_options
-            
-            # Recalculate time windows
-            await _recalculate_time_windows(hass)
-            
-            _LOGGER.info(f"Updated cheapest time window period from {current_value} to {window_hours} hours and recalculated windows")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error setting cheapest window hours: {e}")
-    
-    async def set_most_expensive_window_hours_service(call: ServiceCall):
-        """Handle set most expensive window hours service call."""
-        try:
-            # Get current value from configuration as default
-            coordinator = hass.data[DOMAIN]["coordinator"]
-            current_value = coordinator._get_max_window_hours()
-            
-            window_hours = call.data.get("window_hours", current_value)
-            
-            # Validate input
-            if not isinstance(window_hours, int) or window_hours < 1 or window_hours > 24:
-                _LOGGER.error(f"Invalid window_hours value: {window_hours}. Must be between 1 and 24.")
-                return
-            
-            # Update configuration
-            entry = coordinator.entry
-            
-            # Update options
-            new_options = dict(entry.options)
-            new_options[CONF_MOST_EXPENSIVE_TIME_WINDOW_PERIOD] = window_hours
-            
-            # Save to config entry
-            hass.config_entries.async_update_entry(entry, options=new_options)
-            
-            # Update runtime data
-            hass.data[DOMAIN]["options"] = new_options
-            
-            # Recalculate time windows
-            await _recalculate_time_windows(hass)
-            
-            _LOGGER.info(f"Updated most expensive time window period from {current_value} to {window_hours} hours and recalculated windows")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error setting most expensive window hours: {e}")
-    
-    async def print_price_statistics_service(call: ServiceCall):
-        """Handle print price statistics service call."""
-        try:
-            data = hass.data[DOMAIN].get("data", [])
-            if not data:
-                _LOGGER.warning("No OKTE data available for printing statistics")
-                return
-            
-            title = call.data.get("title", "Štatistiky cien")
-            
-            # Print statistics to log
-            await hass.async_add_executor_job(
-                print_price_statistics, data, title
-            )
-            
-        except Exception as e:
-            _LOGGER.error(f"Error printing price statistics: {e}")
-    
-    async def print_cheapest_window_service(call: ServiceCall):
-        """Handle print cheapest window service call."""
-        try:
-            data = hass.data[DOMAIN].get("data", [])
-            if not data:
-                _LOGGER.warning("No OKTE data available for printing cheapest window")
-                return
-            
-            window_hours = call.data.get("window_hours", DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD)
-            
-            # Print cheapest window to log
-            await hass.async_add_executor_job(
-                print_cheapest_window, data, window_hours
-            )
-            
-        except Exception as e:
-            _LOGGER.error(f"Error printing cheapest window: {e}")
-    
-    async def print_most_expensive_window_service(call: ServiceCall):
-        """Handle print most expensive window service call."""
-        try:
-            data = hass.data[DOMAIN].get("data", [])
-            if not data:
-                _LOGGER.warning("No OKTE data available for printing most expensive window")
-                return
-            
-            window_hours = call.data.get("window_hours", DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD)
-            
-            # Print most expensive window to log
-            await hass.async_add_executor_job(
-                print_most_expensive_window, data, window_hours
-            )
-            
-        except Exception as e:
-            _LOGGER.error(f"Error printing most expensive window: {e}")
-    
-    # Register all services
-    services_to_register = [
-        ("fetch_data", fetch_data_service),
-        ("calculate_price_statistics", calculate_price_statistics_service),
-        ("find_multiple_expensive_windows", find_multiple_expensive_windows_service),
-        ("find_multiple_cheap_windows", find_multiple_cheap_windows_service),
-        ("set_cheapest_window_hours", set_cheapest_window_hours_service),
-        ("set_most_expensive_window_hours", set_most_expensive_window_hours_service),
-        ("print_price_statistics", print_price_statistics_service),
-        ("print_cheapest_window", print_cheapest_window_service),
-        ("print_most_expensive_window", print_most_expensive_window_service),
-    ]
-    
-    for service_name, service_handler in services_to_register:
-        hass.services.async_register(
-            DOMAIN,
-            service_name,
-            service_handler,
-        )
-    
-    _LOGGER.info(f"Registered {len(services_to_register)} OKTE services")
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload config entry."""
+    await async_unload_entry(hass, entry)
+    await async_setup_entry(hass, entry)

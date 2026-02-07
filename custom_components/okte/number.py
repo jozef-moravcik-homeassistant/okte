@@ -1,222 +1,163 @@
-"""
-OKTE Integration for Home Assistant
-Custom integration for fetching and analyzing electricity prices from OKTE Slovakia
-*** OKTE number entities for Home Assistant ***
-
-Author: Jozef Moravcik
-email: jozef.moravcik@moravcik.eu
-"""
+"""Number platform for OKTE integration."""
+from __future__ import annotations
 
 import logging
-from datetime import datetime
+from typing import Any
 
-from homeassistant.components.number import NumberEntity
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import (
-    DOMAIN, 
-    CONF_CHEAPEST_TIME_WINDOW_PERIOD,
-    CONF_MOST_EXPENSIVE_TIME_WINDOW_PERIOD,
-    DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD,
-    DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD
+    DOMAIN,
+    CONF_DEVICE_TYPE,
+    DEVICE_TYPE_CALCULATOR,
+    ENTITY_LOWEST_WINDOW_SIZE,
+    ENTITY_HIGHEST_WINDOW_SIZE,
 )
 
-_LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up OKTE number entities from a config entry."""
-    number_entities = [
-        OkteCheapestWindowHoursNumber(hass),
-        OkteMostExpensiveWindowHoursNumber(hass),
+    """Set up OKTE number entities."""
+    LOGGER.info(f"=== NUMBER PLATFORM CALLED === Entry ID: {config_entry.entry_id}")
+    
+    device_type = config_entry.data.get(CONF_DEVICE_TYPE)
+    LOGGER.info(f"Number platform setup, device_type: {device_type}")
+    
+    # Only Calculator devices have number entities
+    if device_type != DEVICE_TYPE_CALCULATOR:
+        LOGGER.info(f"Skipping number entities - not a Calculator device")
+        return
+    
+    # Get instance from hass.data
+    instance = hass.data[DOMAIN][config_entry.entry_id]["instance"]
+    
+    LOGGER.info(f"Creating window size number entities")
+    
+    # Create only window size entities (time is now handled by time.py)
+    numbers = [
+        OkteNumberEntity(hass, config_entry, instance, ENTITY_LOWEST_WINDOW_SIZE),
+        OkteNumberEntity(hass, config_entry, instance, ENTITY_HIGHEST_WINDOW_SIZE),
     ]
     
-    async_add_entities(number_entities)
+    LOGGER.info(f"Adding {len(numbers)} number entities")
+    async_add_entities(numbers, True)
+    LOGGER.info("Number entities added successfully")
 
 
-class OkteCheapestWindowHoursNumber(NumberEntity):
-    """Number entity for setting cheapest time window hours."""
-
-    def __init__(self, hass: HomeAssistant):
+class OkteNumberEntity(NumberEntity):
+    """Number entity for window size settings."""
+    
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry, instance, entity_id: str):
         """Initialize the number entity."""
         self.hass = hass
-        self._attr_unique_id = "okte_cheapest_window_hours"
-        self.entity_id = "number.okte_cheapest_window_hours"
-        self._attr_icon = "mdi:clock-time-eight"
+        self.config_entry = config_entry
+        self.instance = instance
+        self._entity_id_key = entity_id
+        self._entry_id = config_entry.entry_id
         self._attr_native_min_value = 1
-        self._attr_native_max_value = 24
+        self._attr_native_max_value = 96  # 24 hours * 4 (15-min periods)
         self._attr_native_step = 1
-        self._attr_native_unit_of_measurement = "h"
-
-        self._attr_has_entity_name = True
-        # self._attr_name = None
-        # self._attr_translation_key = "cheapest_window_hours"
-
-        # Set name based on language
-        language = hass.config.language
-        if language == "sk":
-            self._attr_name = "Najlacnejšie hodiny"
+        self._attr_mode = NumberMode.BOX
+        self._attr_native_unit_of_measurement = "periods"
+        
+        # Generate entity_id
+        from .const import ENTITY_PREFIX, get_calculator_number_from_name
+        calculator_number = get_calculator_number_from_name(instance.settings.device_name)
+        self.entity_id = f"number.{ENTITY_PREFIX}_{calculator_number}_{entity_id}"
+        self._attr_unique_id = f"{DOMAIN}_{config_entry.entry_id}_{entity_id}"
+        
+        # Set initial value from instance or default
+        if hasattr(instance, 'number_values') and entity_id in instance.number_values:
+            self._attr_native_value = instance.number_values[entity_id]
         else:
-            self._attr_name = "Cheapest Hours"
-
-    @property
-    def device_info(self):
-        """Return device information."""
-        return {
-            "identifiers": {(DOMAIN, "okte_main")},
-            "name": "OKTE",
-            "manufacturer": "OKTE",
-            "model": "Electricity Price Monitor",
-            "sw_version": "1.0.0",
-        }
-
-    @property
-    def available(self):
-        """Return if number entity is available."""
-        return DOMAIN in self.hass.data
-
-    @property
-    def native_value(self):
-        """Return the current value."""
-        if DOMAIN not in self.hass.data:
-            return DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD
-        
-        # Get current value from configuration
-        coordinator = self.hass.data[DOMAIN].get("coordinator")
-        if coordinator:
-            return coordinator._get_min_window_hours()
-        
-        # Fallback to default
-        return DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD
-
-    async def async_set_native_value(self, value: float) -> None:
-        """Set new value for cheapest window hours."""
-        window_hours = int(value)
-        
-        _LOGGER.debug(f"Setting cheapest window hours to: {window_hours}")
-        
-        try:
-            # Call the service to update the configuration
-            await self.hass.services.async_call(
-                DOMAIN,
-                "set_cheapest_window_hours",
-                {"window_hours": window_hours},
-                blocking=True
+            self._attr_native_value = 3  # Default 3 hours
+    
+    async def async_added_to_hass(self) -> None:
+        """Run when entity is added to hass."""
+        # Listen for updates
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_number_update_{self.config_entry.entry_id}",
+                self._handle_update
             )
-            
-            # Force state update
+        )
+    
+    @callback
+    def _handle_update(self) -> None:
+        """Handle updates from instance."""
+        if hasattr(self.instance, 'number_values') and self._entity_id_key in self.instance.number_values:
+            self._attr_native_value = self.instance.number_values[self._entity_id_key]
             self.async_write_ha_state()
-            
-        except Exception as e:
-            _LOGGER.error(f"Error setting cheapest window hours: {e}")
-
-    @property
-    def extra_state_attributes(self):
-        """Return extra state attributes."""
-        coordinator = self.hass.data[DOMAIN].get("coordinator") if DOMAIN in self.hass.data else None
-        current_value = coordinator._get_min_window_hours() if coordinator else DEFAULT_CHEAPEST_TIME_WINDOW_PERIOD
+    
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the current value."""
+        self._attr_native_value = int(value)
         
-        return {
-            "description": "Počet hodín pre výpočet najlacnejšieho časového okna",
-            "current_setting": current_value,
-            "service_name": "set_cheapest_window_hours",
-            "min_value": 1,
-            "max_value": 24
+        # Store in instance
+        if not hasattr(self.instance, 'number_values'):
+            self.instance.number_values = {}
+        self.instance.number_values[self._entity_id_key] = int(value)
+        
+        # Trigger recalculation
+        await self.instance.my_controller()
+    
+    @property
+    def unique_id(self) -> str:
+        """Return unique ID."""
+        return f"{self.config_entry.entry_id}_{self._entity_id_key}"
+    
+    @property
+    def device_info(self) -> dict[str, Any]:
+        """Return device info."""
+        from .const import MANUFACTURER, MODEL_CALCULATOR, VERSION, DOCUMENTATION_URL
+        from homeassistant.helpers.entity import DeviceInfo
+        
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            name=self.instance.settings.device_name,
+            manufacturer=MANUFACTURER,
+            model=MODEL_CALCULATOR,
+            sw_version=VERSION,
+            configuration_url=DOCUMENTATION_URL,
+        )
+    
+    @property
+    def name(self) -> str:
+        """Return the name - dynamically generated with device prefix."""
+        # Base names
+        names = {
+            ENTITY_LOWEST_WINDOW_SIZE: "Najnižšie ceny - Veľkosť okna",
+            ENTITY_HIGHEST_WINDOW_SIZE: "Najvyššie ceny - Veľkosť okna",
         }
-
-
-class OkteMostExpensiveWindowHoursNumber(NumberEntity):
-    """Number entity for setting most expensive time window hours."""
-
-    def __init__(self, hass: HomeAssistant):
-        """Initialize the number entity."""
-        self.hass = hass
-        self._attr_unique_id = "okte_most_expensive_window_hours"
-        self.entity_id = "number.okte_most_expensive_window_hours"
-        self._attr_icon = "mdi:clock-time-four"
-        self._attr_native_min_value = 1
-        self._attr_native_max_value = 24
-        self._attr_native_step = 1
-        self._attr_native_unit_of_measurement = "h"
-
-        self._attr_has_entity_name = True
-        # self._attr_name = None
-        # self._attr_translation_key = "most_expensive_window_hours"
-
-        # Set name based on language
-        language = hass.config.language
-        if language == "sk":
-            self._attr_name = "Najdrahšie hodiny"
+        translated_name = names.get(self._entity_id_key, self._entity_id_key)
+        
+        # Apply prefix based on checkbox setting
+        if self.instance.settings.include_device_name_in_entity:
+            # Calculator: "OKTE - {device_label} - {translated_name}"
+            from homeassistant.helpers import device_registry as dr
+            device_registry = dr.async_get(self.hass)
+            device_entry = device_registry.async_get_device(identifiers={(DOMAIN, self._entry_id)})
+            
+            if device_entry and device_entry.name_by_user:
+                device_label = device_entry.name_by_user
+            else:
+                device_label = self.instance.settings.device_name
+            
+            return f"OKTE - {device_label} - {translated_name}"
         else:
-            self._attr_name = "Expensive Hours"
-
+            return translated_name
+    
     @property
-    def device_info(self):
-        """Return device information."""
-        return {
-            "identifiers": {(DOMAIN, "okte_main")},
-            "name": "OKTE",
-            "manufacturer": "OKTE",
-            "model": "Electricity Price Monitor",
-            "sw_version": "1.0.0",
-        }
-
-    @property
-    def available(self):
-        """Return if number entity is available."""
-        return DOMAIN in self.hass.data
-
-    @property
-    def native_value(self):
-        """Return the current value."""
-        if DOMAIN not in self.hass.data:
-            return DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD
-        
-        # Get current value from configuration
-        coordinator = self.hass.data[DOMAIN].get("coordinator")
-        if coordinator:
-            return coordinator._get_max_window_hours()
-        
-        # Fallback to default
-        return DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD
-
-    async def async_set_native_value(self, value: float) -> None:
-        """Set new value for most expensive window hours."""
-        window_hours = int(value)
-        
-        _LOGGER.debug(f"Setting most expensive window hours to: {window_hours}")
-        
-        try:
-            # Call the service to update the configuration
-            await self.hass.services.async_call(
-                DOMAIN,
-                "set_most_expensive_window_hours",
-                {"window_hours": window_hours},
-                blocking=True
-            )
-            
-            # Force state update
-            self.async_write_ha_state()
-            
-        except Exception as e:
-            _LOGGER.error(f"Error setting most expensive window hours: {e}")
-
-    @property
-    def extra_state_attributes(self):
-        """Return extra state attributes."""
-        coordinator = self.hass.data[DOMAIN].get("coordinator") if DOMAIN in self.hass.data else None
-        current_value = coordinator._get_max_window_hours() if coordinator else DEFAULT_MOST_EXPENSIVE_TIME_WINDOW_PERIOD
-        
-        return {
-            "description": "Počet hodín pre výpočet najdrahšieho časového okna",
-            "current_setting": current_value,
-            "service_name": "set_most_expensive_window_hours",
-            "min_value": 1,
-            "max_value": 24
-        }
+    def icon(self) -> str:
+        """Return icon."""
+        return "mdi:window-maximize"
