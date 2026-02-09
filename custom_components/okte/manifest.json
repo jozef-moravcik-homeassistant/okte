@@ -1,6 +1,6 @@
 {
   "domain": "okte",
-  "name": "OKTE",
+  "name": "OKTE - Slovak Energy Market",
   "codeowners": ["@jozef-moravcik-homeassistant"],
   "config_flow": true,
   "dependencies": [],

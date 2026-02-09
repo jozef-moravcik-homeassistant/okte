@@ -5,6 +5,8 @@ from __future__ import annotations
 
 """ button.py """
 
+""" Button platform for OKTE integration."""
+
 import logging
 from typing import Any
 
@@ -59,22 +61,28 @@ async def _load_translations(hass: HomeAssistant) -> dict:
     import json
     from pathlib import Path
     
-    language = hass.config.language or "en"
-    integration_dir = Path(__file__).parent
+    def _sync_load_translations() -> dict:
+        """Synchronous translation loading."""
+        language = hass.config.language or "en"
+        integration_dir = Path(__file__).parent
+        
+        # Try to load language-specific translations
+        translation_file = integration_dir / "translations" / f"{language}.json"
+        if translation_file.exists():
+            with open(translation_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        
+        # Fallback to strings.json
+        strings_file = integration_dir / "strings.json"
+        if strings_file.exists():
+            with open(strings_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        
+        return {}
     
-    # Try to load language-specific translations
-    translation_file = integration_dir / "translations" / f"{language}.json"
-    if translation_file.exists():
-        with open(translation_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    
-    # Fallback to strings.json
-    strings_file = integration_dir / "strings.json"
-    if strings_file.exists():
-        with open(strings_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    
-    return {}
+    # Run blocking file I/O in executor to avoid blocking event loop
+    return await hass.async_add_executor_job(_sync_load_translations)
+
 
 class UpdateDataButton(ButtonEntity):
     """Button to manually update data from API."""
@@ -110,6 +118,9 @@ class UpdateDataButton(ButtonEntity):
             if trans_name:
                 translated_name = trans_name
         
+        # Store translated name for later use
+        self._translated_name = translated_name
+        
         # Apply prefix if checkbox is enabled
         if instance.settings.include_device_name_in_entity:
             self._attr_name = f"OKTE - {translated_name}"
@@ -131,36 +142,6 @@ class UpdateDataButton(ButtonEntity):
             sw_version=VERSION,
             configuration_url=DOCUMENTATION_URL,
         )
-    
-    @property
-    def name(self) -> str:
-        """Return the name of the button - dynamically generated."""
-        translated_name = "Update Data"
-        
-        # Try to get translation
-        try:
-            import json
-            from pathlib import Path
-            
-            language = self.hass.config.language or "en"
-            integration_dir = Path(__file__).parent
-            translation_file = integration_dir / "translations" / f"{language}.json"
-            
-            if translation_file.exists():
-                with open(translation_file, "r", encoding="utf-8") as f:
-                    translations = json.load(f)
-                    entity_trans = translations.get("entity", {}).get("button", {}).get("update_data", {})
-                    trans_name = entity_trans.get("name")
-                    if trans_name:
-                        translated_name = trans_name
-        except:
-            pass
-        
-        # Apply prefix if checkbox is enabled
-        if self._instance.settings.include_device_name_in_entity:
-            return f"OKTE - {translated_name}"
-        else:
-            return translated_name
     
     async def async_press(self) -> None:
         """Handle button press - fetch data from API."""

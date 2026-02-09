@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """ binary_sensor.py """
 
-"""Binary Sensor platform for OKTE Integration."""
+""" Binary Sensor platform for OKTE Integration."""
 
 import logging
 import json
@@ -212,8 +212,6 @@ class BinarySensorEntityDefinition(BinarySensorEntity):
             self.entity_id = f"binary_sensor.{ENTITY_PREFIX}_{calculator_number}_{entity_id}"
         
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{entity_id}"
-        self._attr_has_entity_name = False  # Always False - we manage full name manually
-        self._attr_translation_key = entity_id
         
         # Get translated name from translations
         translated_name = name  # Default fallback
@@ -250,6 +248,25 @@ class BinarySensorEntityDefinition(BinarySensorEntity):
                 f"{DOMAIN}_feedback_update_{self._entry_id}",
                 self._handle_feedback_update,
             )
+        )
+        
+        # Track device registry changes to update entity name immediately when device name changes
+        from homeassistant.helpers.device_registry import async_get as async_get_device_registry, EVENT_DEVICE_REGISTRY_UPDATED
+        from homeassistant.helpers.event import async_track_entity_registry_updated_event
+        
+        @callback
+        def device_registry_updated(event):
+            """Handle device registry update - refresh entity name."""
+            # Check if this event is for our device
+            if event.data.get("device_id"):
+                device_registry = async_get_device_registry(self.hass)
+                device = device_registry.async_get(event.data["device_id"])
+                if device and (DOMAIN, self._entry_id) in device.identifiers:
+                    # Device name changed - update entity state to refresh the name
+                    self.async_write_ha_state()
+        
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_DEVICE_REGISTRY_UPDATED, device_registry_updated)
         )
 
     @callback

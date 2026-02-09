@@ -87,16 +87,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_FETCH_TIME,
             entry.data.get(CONF_FETCH_TIME, DEFAULT_FETCH_TIME)
         )
-        fetch_days = entry.options.get(
-            CONF_FETCH_DAYS,
-            entry.data.get(CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS)
-        )
         
         # Set master settings
         instance.settings.device_name = device_name
         instance.settings.include_device_name_in_entity = include_device_name_in_entity
         instance.settings.fetch_time = fetch_time
-        instance.settings.fetch_days = fetch_days
+        instance.settings.fetch_days = DEFAULT_FETCH_DAYS  # Fixed value, not configurable
         
     else:  # DEVICE_TYPE_CALCULATOR
         instance = OKTE_Window_Instance()
@@ -151,7 +147,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_DEVICE_NAME: device_name,
                 CONF_INCLUDE_DEVICE_NAME_IN_ENTITY: include_device_name_in_entity,
                 CONF_FETCH_TIME: fetch_time,
-                CONF_FETCH_DAYS: fetch_days,
             }
         else:
             hass.data[DOMAIN][entry.entry_id] = {
@@ -164,6 +159,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         LOGGER.info(f"=== SETUP ENTRY === Entry ID: {entry.entry_id}, Device Type: {device_type}, Device Name: {device_name}")
         LOGGER.info(f"About to setup platforms: {PLATFORMS}")
+        
+        # Create repair issue to inform user about recorder exclusion recommendation
+        # These entities have large attributes (HTML tables, price JSON) exceeding 16KB limit
+        if device_type == DEVICE_TYPE_MASTER:
+            try:
+                from homeassistant.helpers import issue_registry as ir
+                from .const import ENTITY_PREFIX
+                
+                entities_list = "\n".join([
+                    f"- sensor.{ENTITY_PREFIX}_prices_today",
+                    f"- sensor.{ENTITY_PREFIX}_prices_tomorrow",
+                    f"- sensor.{ENTITY_PREFIX}_html_table_today",
+                    f"- sensor.{ENTITY_PREFIX}_html_table_tomorrow",
+                ])
+                
+                yaml_config = (
+                    "recorder:\n"
+                    "  exclude:\n"
+                    "    entities:\n" +
+                    "\n".join([
+                        f"      - sensor.{ENTITY_PREFIX}_prices_today",
+                        f"      - sensor.{ENTITY_PREFIX}_prices_tomorrow",
+                        f"      - sensor.{ENTITY_PREFIX}_html_table_today",
+                        f"      - sensor.{ENTITY_PREFIX}_html_table_tomorrow",
+                    ])
+                )
+                
+                ir.async_create_issue(
+                    hass,
+                    DOMAIN,
+                    "recorder_exclude_large_entities",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="recorder_exclude_recommendation",
+                    translation_placeholders={
+                        "entities": entities_list,
+                        "yaml_config": yaml_config,
+                    },
+                )
+            except Exception as e:
+                LOGGER.debug(f"Could not create repair issue: {e}")
         
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         

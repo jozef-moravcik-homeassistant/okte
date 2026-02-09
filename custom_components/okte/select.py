@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """ select.py """
 
-"""Select platform for OKTE Integration - Reserved for future use."""
+""" Select platform for OKTE Integration - Reserved for future use."""
 
 import logging
 

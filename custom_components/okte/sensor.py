@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """ sensor.py """
 
-"""Sensor platform for OKTE Integration."""
+""" Sensor platform for OKTE Integration."""
 
 import logging
 import json
@@ -112,7 +112,6 @@ async def async_setup_entry(
                 default_value=None,
                 enabled_by_default=True,
                 device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.MEASUREMENT,
                 native_unit_of_measurement="EUR/MWh",
                 suggested_display_precision=2,
             ),
@@ -128,7 +127,6 @@ async def async_setup_entry(
                 default_value=None,
                 enabled_by_default=True,
                 device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.MEASUREMENT,
                 native_unit_of_measurement="EUR/MWh",
                 suggested_display_precision=2,
             ),
@@ -144,7 +142,6 @@ async def async_setup_entry(
                 default_value=None,
                 enabled_by_default=True,
                 device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.MEASUREMENT,
                 native_unit_of_measurement="EUR/MWh",
                 suggested_display_precision=2,
             ),
@@ -160,7 +157,6 @@ async def async_setup_entry(
                 default_value=None,
                 enabled_by_default=True,
                 device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.MEASUREMENT,
                 native_unit_of_measurement="EUR/MWh",
                 suggested_display_precision=2,
             ),
@@ -176,7 +172,6 @@ async def async_setup_entry(
                 default_value=None,
                 enabled_by_default=True,
                 device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.MEASUREMENT,
                 native_unit_of_measurement="EUR/MWh",
                 suggested_display_precision=2,
             ),
@@ -192,7 +187,6 @@ async def async_setup_entry(
                 default_value=None,
                 enabled_by_default=True,
                 device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.MEASUREMENT,
                 native_unit_of_measurement="EUR/MWh",
                 suggested_display_precision=2,
             ),
@@ -208,7 +202,6 @@ async def async_setup_entry(
                 default_value=None,
                 enabled_by_default=True,
                 device_class=SensorDeviceClass.MONETARY,
-                state_class=SensorStateClass.MEASUREMENT,
                 native_unit_of_measurement="EUR/MWh",
                 suggested_display_precision=2,
             ),
@@ -477,8 +470,6 @@ class SensorEntityDefinition(SensorEntity):
             self.entity_id = f"sensor.{ENTITY_PREFIX}_{calculator_number}_{entity_id}"
         
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_{entity_id}"
-        self._attr_has_entity_name = False  # Always False - we manage full name manually
-        self._attr_translation_key = entity_id
         
         # Get translated name from translations
         translated_name = name  # Default fallback
@@ -567,6 +558,25 @@ class SensorEntityDefinition(SensorEntity):
                 self._handle_feedback_update,
             )
         )
+        
+        # Track device registry changes to update entity name immediately when device name changes
+        from homeassistant.helpers.device_registry import async_get as async_get_device_registry, EVENT_DEVICE_REGISTRY_UPDATED
+        from homeassistant.helpers.event import async_track_entity_registry_updated_event
+        
+        @callback
+        def device_registry_updated(event):
+            """Handle device registry update - refresh entity name."""
+            # Check if this event is for our device
+            if event.data.get("device_id"):
+                device_registry = async_get_device_registry(self.hass)
+                device = device_registry.async_get(event.data["device_id"])
+                if device and (DOMAIN, self._entry_id) in device.identifiers:
+                    # Device name changed - update entity state to refresh the name
+                    self.async_write_ha_state()
+        
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_DEVICE_REGISTRY_UPDATED, device_registry_updated)
+        )
 
     @callback
     def _handle_feedback_update(self) -> None:
@@ -645,7 +655,7 @@ class SensorEntityDefinition(SensorEntity):
         LOGGER.debug(f"Updated {self.entity_id} complete")
 
     @property
-    def extra_state_attributes(self) -> dict:
+    def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return the state attributes."""
         # For prices_today and prices_tomorrow - return attributes from sensor_attributes (managed by okte.py)
         if self._entity_id in [ENTITY_PRICES_TODAY, ENTITY_PRICES_TOMORROW]:

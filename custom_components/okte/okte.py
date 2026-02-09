@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """ okte.py """
 
-"""Core classes and API functions for OKTE Integration."""
+""" Core classes and API functions for OKTE Integration."""
 
 from datetime import datetime, timedelta, time as dt_time
 import logging

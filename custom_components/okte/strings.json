@@ -180,5 +180,11 @@
         "name": "Detector Highest Price Tomorrow"
       }
     }
+  },
+  "issues": {
+    "recorder_exclude_recommendation": {
+      "title": "Exclude large OKTE entities from recorder",
+      "description": "Some OKTE entities contain large data (HTML tables, price lists) exceeding 16KB which can cause database performance issues.\n\nThese entities are still visible in UI but should not be stored in history database:\n\n{entities}\n\nAdd this configuration to your configuration.yaml:\n\n```yaml\n{yaml_config}\n```\n\nThen restart Home Assistant to apply the changes."
+    }
   }
 }

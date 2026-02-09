@@ -4,7 +4,8 @@
 
 """ const.py """
 
-"""Constants for the OKTE Integration."""
+""" Constants for the OKTE Integration."""
+
 from homeassistant.const import STATE_ON, STATE_OFF, STATE_UNKNOWN, STATE_UNAVAILABLE, STATE_OK, STATE_PROBLEM
 
 DOMAIN = "okte"
@@ -12,8 +13,8 @@ VERSION = "1.01.01"
 DOCUMENTATION_URL = "https://github.com/jozef-moravcik-homeassistant/okte"
 MANUFACTURER = "Jozef Moravcik"
 MODEL_MASTER = "OKTE Master"
-MODEL_CALCULATOR = "OKTE Calculator"
-NAME = "OKTE"
+MODEL_CALCULATOR = "Calculator"
+NAME = "OKTE - Slovak Energy Market"
 
 # Entity ID prefix
 ENTITY_PREFIX = "okte"
@@ -46,9 +47,9 @@ def get_next_calculator_number(hass) -> int:
     calculator_numbers = []
     for entry in calculator_entries:
         device_name = entry.data.get(CONF_DEVICE_NAME, "")
-        if device_name.startswith("OKTE Calculator "):
+        if device_name.startswith("Calculator "):
             try:
-                num = int(device_name.replace("OKTE Calculator ", ""))
+                num = int(device_name.replace("Calculator ", ""))
                 calculator_numbers.append(num)
             except ValueError:
                 continue
@@ -70,8 +71,8 @@ def get_next_calculator_number(hass) -> int:
 def get_calculator_number_from_name(device_name: str) -> int:
     """Extract calculator number from device name."""
     try:
-        if device_name.startswith("OKTE Calculator "):
-            return int(device_name.replace("OKTE Calculator ", ""))
+        if device_name.startswith("Calculator "):
+            return int(device_name.replace("Calculator ", ""))
     except ValueError:
         pass
     return 1

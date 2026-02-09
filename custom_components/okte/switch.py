@@ -1,5 +1,11 @@
-"""Switch entities for OKTE Calculator device auto time settings."""
 from __future__ import annotations
+"""The OKTE Integration"""
+"""Author: Jozef Moravcik"""
+"""email: jozef.moravcik@moravcik.eu"""
+
+""" switch.py """
+
+""" Switch entities for OKTE Calculator device """
 
 import logging
 from typing import Any
@@ -117,6 +123,24 @@ class OkteAutoTimeSwitch(SwitchEntity):
         # If switch is ON at startup, update the time value
         if self._attr_is_on:
             await self._update_time_value()
+        
+        # Track device registry changes to update entity name immediately when device name changes
+        from homeassistant.helpers.device_registry import async_get as async_get_device_registry, EVENT_DEVICE_REGISTRY_UPDATED
+        
+        @callback
+        def device_registry_updated(event):
+            """Handle device registry update - refresh entity name."""
+            # Check if this event is for our device
+            if event.data.get("device_id"):
+                device_registry = async_get_device_registry(self.hass)
+                device = device_registry.async_get(event.data["device_id"])
+                if device and (DOMAIN, self._entry_id) in device.identifiers:
+                    # Device name changed - update entity state to refresh the name
+                    self.async_write_ha_state()
+        
+        self.async_on_remove(
+            self.hass.bus.async_listen(EVENT_DEVICE_REGISTRY_UPDATED, device_registry_updated)
+        )
     
     @callback
     def _handle_update(self) -> None:

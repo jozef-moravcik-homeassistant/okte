@@ -180,5 +180,11 @@
         "name": "Detektor najvyššej ceny zajtra"
       }
     }
+  },
+  "issues": {
+    "recorder_exclude_recommendation": {
+      "title": "Vylúčte veľké OKTE entity z recorder histórie",
+      "description": "Niektoré OKTE entity obsahujú veľké dáta (HTML tabuľky, zoznamy cien) presahujúce 16KB, čo môže spôsobiť problémy s výkonom databázy.\n\nTieto entity sú stále viditeľné v UI, ale nemali by sa ukladať do histórie databázy:\n\n{entities}\n\nPridajte túto konfiguráciu do vášho configuration.yaml:\n\n```yaml\n{yaml_config}\n```\n\nPotom reštartujte Home Assistant pre aplikovanie zmien."
+    }
   }
 }

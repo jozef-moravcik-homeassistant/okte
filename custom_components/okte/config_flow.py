@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """ config_flow.py """
 
-"""Config flow for OKTE Integration."""
+""" Config flow for OKTE Integration."""
 
 import logging
 import voluptuous as vol
@@ -61,44 +61,43 @@ class OkteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
-            # Validate fetch_time format
-            try:
-                parts = user_input[CONF_FETCH_TIME].split(':')
-                if len(parts) != 2:
-                    raise ValueError
-                hour = int(parts[0])
-                minute = int(parts[1])
-                if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-                    raise ValueError
-            except ValueError:
-                errors[CONF_FETCH_TIME] = "invalid_time"
+            # Convert time object to string with seconds=0 (TimeSelector returns time object)
+            from datetime import time as dt_time
+            if CONF_FETCH_TIME in user_input and isinstance(user_input[CONF_FETCH_TIME], dt_time):
+                time_obj = user_input[CONF_FETCH_TIME]
+                # Convert to string HH:MM format (seconds always 0)
+                user_input[CONF_FETCH_TIME] = f"{time_obj.hour:02d}:{time_obj.minute:02d}"
             
-            if not errors:
-                # IMPORTANT: Preserve CONF_DEVICE_TYPE before update
-                device_type = self._data.get(CONF_DEVICE_TYPE)
-                
-                # Master device always has fixed name "OKTE Master"
-                device_name = "OKTE Master"
-                self._data[CONF_DEVICE_NAME] = device_name
-                self._data.update(user_input)
-                
-                # Restore CONF_DEVICE_TYPE (it was set in async_step_user)
-                if device_type:
-                    self._data[CONF_DEVICE_TYPE] = device_type
-                
-                unique_id = f"{DOMAIN}_master"
-                
-                await self.async_set_unique_id(unique_id)
-                self._abort_if_unique_id_configured()
-                
-                LOGGER.info(f"Creating Master entry with data: {self._data}")
-                
-                return self.async_create_entry(
-                    title=device_name,
-                    data=self._data,
-                )
+            # IMPORTANT: Preserve CONF_DEVICE_TYPE before update
+            device_type = self._data.get(CONF_DEVICE_TYPE)
+            
+            # Master device always has fixed name "OKTE Master"
+            device_name = "OKTE Master"
+            self._data[CONF_DEVICE_NAME] = device_name
+            self._data.update(user_input)
+            
+            # Restore CONF_DEVICE_TYPE (it was set in async_step_user)
+            if device_type:
+                self._data[CONF_DEVICE_TYPE] = device_type
+            
+            unique_id = f"{DOMAIN}_master"
+            
+            await self.async_set_unique_id(unique_id)
+            self._abort_if_unique_id_configured()
+            
+            LOGGER.info(f"Creating Master entry with data: {self._data}")
+            
+            return self.async_create_entry(
+                title=device_name,
+                data=self._data,
+            )
 
-        # Master device configuration - NO device_name field
+        # Master device configuration - NO device_name field, NO fetch_days field
+        # Convert DEFAULT_FETCH_TIME string to time object
+        from datetime import time as dt_time
+        default_time_parts = DEFAULT_FETCH_TIME.split(':')
+        default_time = dt_time(int(default_time_parts[0]), int(default_time_parts[1]))
+        
         data_schema = vol.Schema(
             {
                 vol.Required(
@@ -107,12 +106,8 @@ class OkteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ): cv.boolean,
                 vol.Required(
                     CONF_FETCH_TIME,
-                    default=DEFAULT_FETCH_TIME,
-                ): cv.string,
-                vol.Required(
-                    CONF_FETCH_DAYS,
-                    default=DEFAULT_FETCH_DAYS,
-                ): NumberSelector(NumberSelectorConfig(min=1, max=7, step=1, mode=NumberSelectorMode.BOX)),
+                    default=default_time,
+                ): TimeSelector(config={}),
             }
         )
 
@@ -152,7 +147,7 @@ class OkteConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Get next available calculator number
             from .const import get_next_calculator_number
             calculator_number = get_next_calculator_number(self.hass)
-            device_name = f"OKTE Calculator {calculator_number}"
+            device_name = f"Calculator {calculator_number}"
             self._data[CONF_DEVICE_NAME] = device_name
             
             unique_id = f"{DOMAIN}_calculator_{calculator_number}"
@@ -222,35 +217,33 @@ class OkteOptionsFlowHandler(config_entries.OptionsFlow):
         errors = {}
 
         if user_input is not None:
-            # Validate fetch_time format
-            try:
-                parts = user_input[CONF_FETCH_TIME].split(':')
-                if len(parts) != 2:
-                    raise ValueError
-                hour = int(parts[0])
-                minute = int(parts[1])
-                if hour < 0 or hour > 23 or minute < 0 or minute > 59:
-                    raise ValueError
-            except ValueError:
-                errors[CONF_FETCH_TIME] = "invalid_time"
+            # Convert time object to string with seconds=0 (TimeSelector returns time object)
+            from datetime import time as dt_time
+            if CONF_FETCH_TIME in user_input and isinstance(user_input[CONF_FETCH_TIME], dt_time):
+                time_obj = user_input[CONF_FETCH_TIME]
+                # Convert to string HH:MM format (seconds always 0)
+                user_input[CONF_FETCH_TIME] = f"{time_obj.hour:02d}:{time_obj.minute:02d}"
             
-            if not errors:
-                self._data.update(user_input)
-                return self.async_create_entry(title="", data=self._data)
+            self._data.update(user_input)
+            return self.async_create_entry(title="", data=self._data)
 
         # Get current values
         current_include_device_name = self.config_entry.options.get(
             CONF_INCLUDE_DEVICE_NAME_IN_ENTITY,
             self.config_entry.data.get(CONF_INCLUDE_DEVICE_NAME_IN_ENTITY, DEFAULT_INCLUDE_DEVICE_NAME_IN_ENTITY)
         )
-        current_fetch_time = self.config_entry.options.get(
+        current_fetch_time_str = self.config_entry.options.get(
             CONF_FETCH_TIME,
             self.config_entry.data.get(CONF_FETCH_TIME, DEFAULT_FETCH_TIME)
         )
-        current_fetch_days = self.config_entry.options.get(
-            CONF_FETCH_DAYS,
-            self.config_entry.data.get(CONF_FETCH_DAYS, DEFAULT_FETCH_DAYS)
-        )
+        
+        # Convert string time to time object
+        from datetime import time as dt_time
+        if isinstance(current_fetch_time_str, str):
+            time_parts = current_fetch_time_str.split(':')
+            current_fetch_time = dt_time(int(time_parts[0]), int(time_parts[1]))
+        else:
+            current_fetch_time = current_fetch_time_str
 
         data_schema = vol.Schema(
             {
@@ -261,11 +254,7 @@ class OkteOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_FETCH_TIME,
                     default=current_fetch_time,
-                ): cv.string,
-                vol.Required(
-                    CONF_FETCH_DAYS,
-                    default=current_fetch_days,
-                ): NumberSelector(NumberSelectorConfig(min=1, max=7, step=1, mode=NumberSelectorMode.BOX)),
+                ): TimeSelector(config={}),
             }
         )
 
