@@ -142,7 +142,6 @@ The **OKTE Master** device is the core component that handles all communication 
 |-----------|---------|-------------|
 | **Add 'OKTE -' prefix to entity names** | ✅ Enabled | Adds "okte_" prefix to all entity IDs |
 | **Daily fetch time** | 14:00 | Time when data is automatically downloaded from OKTE API |
-| **Number of days to fetch** | 2 | How many days of data to retrieve (today + tomorrow) |
 
 > ⚠️ **Important:** OKTE publishes next day prices around **13:00**, so the default fetch time of **14:00** ensures you always have up-to-date data for both days.
 

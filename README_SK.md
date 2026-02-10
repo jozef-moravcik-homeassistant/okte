@@ -142,7 +142,6 @@ Oba typy zariadení ponúkajú možnosť **zahrnúť názov zariadenia do názvo
 |-----------|-------------------|-------|
 | **Pridať prefix 'OKTE -' k názvom entít** | ✅ Zapnuté | Pridá prefix "okte_" ku všetkým ID entít |
 | **Denný čas sťahovania** | 14:00 | Čas, kedy sa automaticky sťahujú údaje z OKTE API |
-| **Počet dní na stiahnutie** | 2 | Koľko dní údajov sa stiahne (dnes + zajtra) |
 
 > ⚠️ **Dôležité:** OKTE zverejňuje ceny na zajtra okolo **13:00**, takže predvolený čas sťahovania **14:00** zabezpečuje, že budete mať vždy aktuálne údaje pre oba dni.
 
