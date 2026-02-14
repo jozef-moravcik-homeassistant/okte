@@ -143,7 +143,7 @@ Oba typy zariadení ponúkajú možnosť **zahrnúť názov zariadenia do názvo
 | **Pridať prefix 'OKTE -' k názvom entít** | ✅ Zapnuté | Pridá prefix "okte_" ku všetkým ID entít |
 | **Denný čas sťahovania** | 14:00 | Čas, kedy sa automaticky sťahujú údaje z OKTE API |
 
-> ⚠️ **Dôležité:** OKTE zverejňuje ceny na zajtra okolo **13:00**, takže predvolený čas sťahovania **14:00** zabezpečuje, že budete mať vždy aktuálne údaje pre oba dni.
+> ⚠️ **Dôležité:** OKTE zverejňuje ceny na zajtra okolo **13:00**, takže predvolený čas sťahovania **14:00** zabezpečuje, že budete mať vždy aktuálne údaje pre oba dni. Údaje sa automaticky sťahujú aj 10, 60 a 120 sekúnd po polnoci, aby boli údaje updatované pre aktuálny deň, ale keďže v OKTE sú údaje na nasledujúci zvedejnené až po 13:00, pri tomto polnočnom sťahovaní sa načíta len aktuálny deň, nasledujúci deň až pri ďalšom  sťahovaní (default 14:00), V prípade neúspešného stiahnutia údajov, napríklad z dôvodu prerušeného pripojenia k internetu, alebo poruchy na strane OKTE, bude sa intergácia pokúšať stiahnuť údaje každú minútu až dokiaľ sa úspešne nestiahnu. Tento stav je indikovaný sensorom sensor.okte_connection_status a chybový kód je zaznamenaný v sensore sensor.okte_error_code.
 
 ### Entity Master zariadenia
 
@@ -167,8 +167,8 @@ Master zariadenie vytvára nasledujúce entity:
 
 | ID entity | Popis | Účel |
 |-----------|-------|------|
-| `sensor.okte_prices_today` | Hodinové ceny dnes | **Pre ApexCharts grafy** |
-| `sensor.okte_prices_tomorrow` | Hodinové ceny zajtra | **Pre ApexCharts grafy** |
+| `sensor.okte_prices_today` | Ceny dnes | **Pre ApexCharts grafy** |
+| `sensor.okte_prices_tomorrow` | Ceny zajtra | **Pre ApexCharts grafy** |
 
 **Atribúty:**
 - `period_data`: Pole objektov obsahujúce:
@@ -185,7 +185,7 @@ Master zariadenie vytvára nasledujúce entity:
 
 **Atribúty:**
 - `html_table`: Kompletný HTML kód tabuľky s:
-  - Hodinovým rozčlenením (00:00 - 23:59)
+  - Periodickým rozčlenením (00:00 - 23:59)
   - Farebne kódovanými cenami (zelená=nízka, žltá=stredná, červená=vysoká)
   - Formátovanými cenami s 2 desatinnými miestami
 
@@ -227,6 +227,7 @@ cards:
       - entity: sensor.okte_html_table_today
       - entity: sensor.okte_html_table_tomorrow
       - type: divider
+      - entity: sensor.okte_error_code sensor
       - entity: sensor.okte_data_count
       - entity: sensor.okte_connection_status
       - entity: sensor.okte_last_update
@@ -697,7 +698,7 @@ cards:
   - 🟢 **Zelená**: Nízke ceny (vhodné pre spotrebu energie)
   - 🟡 **Žltá**: Stredné ceny
   - 🔴 **Červená**: Vysoké ceny (znížte spotrebu)
-- 🕐 **Hodinové rozčlenenie** od 00:00 do 23:59
+- 🕐 **Periodické rozčlenenie** od 00:00 do 23:59
 - 💰 **Formátované ceny** s 2 desatinnými miestami
 - 📱 **Responzívny dizajn** prispôsobený veľkosti obrazovky
 
@@ -945,7 +946,7 @@ Tento projekt je licencovaný pod MIT licenciou - pozrite súbor [LICENSE](LICEN
 
 - **OKTE** (Operátor krátkodobého trhu s elektrinou) za poskytovanie verejného API
 - **Home Assistant komunita** za neustálu podporu a inšpiráciu
-- **Všetci prispievatelia** ktorí pomohli vylepšiť túto integráciu
+- **Všetci prispievatelia** ktorí pomôžu vylepšiť túto integráciu
 
 ---
 
